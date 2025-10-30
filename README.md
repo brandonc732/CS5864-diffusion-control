@@ -3,4 +3,4 @@ Repository for CS5864 final project about controlling stable diffusion generatio
 
 
 
-Will add more after class today
+Will add more by Friday morning
