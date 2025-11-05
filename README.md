@@ -1,6 +1,8 @@
 # CS5864-diffusion-control
 Repository for CS5864 final project about controlling stable diffusion generation bias by manipulating the U-Net model's attention mechanisms
-
+```python 
+pip install transformers==4.55.4 diffusers==0.35.2 scipy ftfy accelerate "tokenizers>=0.21,<0.23"
+```
 
 
 # Source papers
