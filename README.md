@@ -20,8 +20,19 @@ The GitHub they provide shows how they construct their custom Stable Diffusion 1
 
 **Bias-Map**
 
-Just released a new paper in September that seems very close to our project. Will have to read through it.
+Focuses on using cross attention maps from OVAM and the overlap between them for bias and occupation terms to quantity where inherent bias may lie in the generation. Their recent update to the paper employs a bayesian setup for using this to guide more fair generation 
 
 (github not provided)
 [arxiv](https://www.arxiv.org/pdf/2509.13496)
+
+
+
+**OVAM**
+
+At its base, OVAM shows how we can simply run a denoising step with a different prompt to show how words not in the original prompt attend to the current latent. Their primary contribution is a way to optimize the individual text tokens to get more accuracy cross attention matrices.
+
+[github](https://github.com/vpulab/ovam)
+[arxiv](https://arxiv.org/pdf/2403.14291)
+
+
 
