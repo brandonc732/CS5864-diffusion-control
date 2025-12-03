@@ -2263,7 +2263,7 @@ class StableDiffusionPipelineX_2(
 
                         # Forward pass of denoising with text conditioning
 
-                        # this adds a batch dimension to each (still batchx4x64x64)
+                        # this adds a batch dimension to each (now 1xbatchx4x64x64)
                         latent = latent.unsqueeze(0)
 
                         text_embedding = text_embedding.unsqueeze(0) # [1, 77, 768]
@@ -2318,7 +2318,7 @@ class StableDiffusionPipelineX_2(
                                     # self_attn_score_pairs=self_attn_score_pairs,
                                     avg_text_sa_norm = avg_block_text_sa_norm,
                                 )
-                        print("T-SAM attn loss:", loss.item())
+                                print(f"Iter {i}, T-SAM attn loss:", loss.item())
 
 
                         # If this is an iterative refinement step, verify we have reached the desired threshold for all
@@ -2338,6 +2338,7 @@ class StableDiffusionPipelineX_2(
                                 avg_text_sa_norm = avg_block_text_sa_norm,
                                 eos_idx=eos_idx,
                             )
+                            print(f"T-SAM loss after iter refinement: {loss.item()}")
                         
 
 
@@ -2361,6 +2362,7 @@ class StableDiffusionPipelineX_2(
                                 bias_info=bias_info,             # list of dictionaries
                                 occupation_info=occupation_info  # just a dictionary  
                             )
+                            print(f"T-SAM loss after BIAS iter refinement: {loss.item()}")
 
                             
                         
@@ -2501,7 +2503,7 @@ class StableDiffusionPipelineX_2(
         if latent_opt_config.bias_loss_function_details:
             details = latent_opt_config.bias_loss_function_details
             if 'max_cnt' in details:
-                max_cnt=details[max_cnt]
+                max_cnt=details['max_cnt']
         
 
         # set break threshold
@@ -2512,6 +2514,7 @@ class StableDiffusionPipelineX_2(
 
         cnt = 0 
         loss = 100.0
+        original_occ_maps = []
         # manually set
         # loss_threshold = {5:0.005*15, 6:0.03*21, 7:0.03*28} # 0.03 is average cosine distance
         # loss_threshold = {5:0.14*4, 6:0.14*5, 7:0.14*6, 8:0.14*7, 9:0.14*8, 10:0.14*9} # 0.03 is average cosine distance # I added all settings for 8+
@@ -2530,9 +2533,13 @@ class StableDiffusionPipelineX_2(
             all_occ_attn_maps = self.attn_fetch_x.get_unet_cross_attn_maps(self.unet) # get a list of all cross attention maps (for displaying)
 
             # get ca matrix for occupation
-            occ_ca_map = prompt_attention_maps[:, :, occupation_info['idx']].squeeze()
-
-            
+            occ_ca_maps = []
+            for map in prompt_attention_maps:
+                occ_ca_maps.append(map[:, :, occupation_info['idx']].squeeze())
+            # occ_ca_map = prompt_attention_maps[:, :, occupation_info['idx']].squeeze()
+                if(cnt==0):
+                    original_occ_maps.append(occ_ca_maps[-1].detach())
+            # print('prompt',prompt_attention_maps.shape,occ_ca_map.shape)
 
 
             # get the cross attention map for first bias
@@ -2543,9 +2550,11 @@ class StableDiffusionPipelineX_2(
             b1_attention_maps = self.bias_loss_get_unet_cross_attention_map(t, latent_opt_config.bias_loss_function_details)
 
             all_b1_attn_maps = self.attn_fetch_x.get_unet_cross_attn_maps(self.unet) # get a list of all cross attention maps (for displaying)
-
+            b1_ca_maps = []
             # get ca matrix for first bias
-            b1_ca_map = b1_attention_maps[:, :, bias_info[0]['idx']].squeeze()
+            for map in b1_attention_maps:
+                b1_ca_maps.append(map[:, :, bias_info[0]['idx']].squeeze())
+            # b1_ca_map = b1_attention_maps[:, :, bias_info[0]['idx']].squeeze()
 
 
 
@@ -2560,9 +2569,13 @@ class StableDiffusionPipelineX_2(
             all_b2_attn_maps = self.attn_fetch_x.get_unet_cross_attn_maps(self.unet) # get a list of all cross attention maps (for displaying)
 
             # get ca matrix for second bias
-            b2_ca_map = b2_attention_maps[:, :, bias_info[1]['idx']].squeeze()
-
-
+            b2_ca_maps = []
+            for map in b2_attention_maps:
+                b2_ca_maps.append(map[:, :, bias_info[1]['idx']].squeeze())
+            # b2_ca_map = b2_attention_maps[:, :, bias_info[1]['idx']].squeeze()
+            
+            # print('b1',b1_attention_maps.shape,b1_ca_map.shape)
+            # print('b2',b2_attention_maps.shape,b2_ca_map.shape)
             
             # make matplot lib plot s
             # plot functions at end of file
@@ -2579,16 +2592,16 @@ class StableDiffusionPipelineX_2(
                                            bias_info=bias_info,
                                            separate_scales=separate_scales)
                     else:
-                        plot_bias_maps(occ_map = occ_ca_map.detach(),
-                                       b1_map = b1_ca_map.detach(), 
-                                       b2_map = b2_ca_map.detach(),
+                        plot_bias_maps(occ_map = occ_ca_maps[0].detach(),
+                                       b1_map = b1_ca_maps[0].detach(), 
+                                       b2_map = b2_ca_maps[0].detach(),
                                        occ_info=occupation_info,
                                        bias_info=bias_info,
                                        separate_scales=separate_scales)                    
                 else:
-                    plot_bias_maps(occ_map = occ_ca_map.detach(),
-                                   b1_map = b1_ca_map.detach(), 
-                                   b2_map = b2_ca_map.detach(),
+                    plot_bias_maps(occ_map = occ_ca_maps[0].detach(),
+                                   b1_map = b1_ca_maps[0].detach(), 
+                                   b2_map = b2_ca_maps[0].detach(),
                                    occ_info=occupation_info,
                                    bias_info=bias_info,
                                    separate_scales=separate_scales)
@@ -2596,7 +2609,15 @@ class StableDiffusionPipelineX_2(
 
 
             # TODO: implement loss function
-            
+            loss=0
+            for occ_ca_map, b1_ca_map, b2_ca_map in zip(original_occ_maps, b1_ca_maps, b2_ca_maps):
+                loss += self._compute_bias_self_attn_loss_cos(
+                    occ_attention_map=occ_ca_map,
+                    b1_attention_map=b1_ca_map,
+                    b2_attention_map=b2_ca_map,
+                    ideal_ratio=1.2
+                )
+
             """
             loss = self.some_loss_function(
                 occ_attention_map=occ_ca_map,
@@ -2606,11 +2627,11 @@ class StableDiffusionPipelineX_2(
             """
             # all of these maps should be a 2D matrix
 
-            import warnings
-            warnings.warn("Bias loss function has not been implemented yet. Setting to 0 by default")
-            loss = 0
+            # import warnings
+            # warnings.warn("Bias loss function has not been implemented yet. Setting to 0 by default")
+            # loss = 0
 
-
+            print(f'bias loss iter {cnt}: {loss.item()}')
 
 
 
@@ -2620,7 +2641,7 @@ class StableDiffusionPipelineX_2(
                 break
 
             if loss != 0:
-                latents = self._update_latent(latents, loss, step_size)
+                latents = self._update_latent(latents, loss, 10*step_size)
         
 
 
@@ -2685,6 +2706,38 @@ class StableDiffusionPipelineX_2(
         return loss, latents
 
 
+    @staticmethod
+    def _compute_bias_self_attn_loss_cos(
+        occ_attention_map=torch.Tensor,
+        b1_attention_map=torch.Tensor,
+        b2_attention_map=torch.Tensor,
+        ideal_ratio=2 #this is desired ration of cosine similarity for b1 to b2
+    ):
+        cos = nn.CosineSimilarity(dim=0)
+        
+        occ_embed = occ_attention_map.detach().view(-1)
+        b1_embed = b1_attention_map.view(-1)
+        b2_embed = b2_attention_map.view(-1)
+
+        b1_occ_cos_score = cos(b1_embed,occ_embed)
+        b2_occ_cos_score = cos(b2_embed,occ_embed)
+        
+        # print(f'b1: {b1_occ_cos_score.item():.3f}, {b1_embed.mean():.3f}, b2: {b2_occ_cos_score.item():.3f}, {b2_embed.mean():.3f}')
+
+        scale_factor = 0.5
+        b_mean = (b1_embed+b2_embed)/2
+        b2_sharp = b2_embed/b_mean.mean()
+        b1_sharp=b1_embed/b_mean.mean()
+        print(f'b1: {b1_occ_cos_score.item():.3f}, {b1_sharp.mean():.3f}, {b1_embed.mean():.3f}, b2: {b2_occ_cos_score.item():.3f}, {b2_sharp.mean():.3f}, {b2_embed.mean():.3f}')
+        b2_scaled = ideal_ratio*scale_factor*b2_sharp
+        b1_scaled = scale_factor*b1_sharp/ideal_ratio
+        mse_loss = torch.nn.functional.mse_loss(b2_scaled,b1_scaled)
+        print(f'mse loss: {mse_loss}')
+        loss = max(0.3,1-b1_occ_cos_score)*max(0.3,1-b2_occ_cos_score)*mse_loss
+        # pred = torch.cat([b1_occ_cos_score.reshape(-1),b2_occ_cos_score.reshape(-1)])
+        # target = torch.tensor([ideal_ratio,1],device=pred.device)
+        # loss = 1 - cos(pred,target)
+        return mse_loss
 
     """
     Function to retrieve the cross attention map from a specific layer in the UNet
@@ -2704,14 +2757,20 @@ class StableDiffusionPipelineX_2(
     def bias_loss_get_unet_cross_attention_map(self, t, bias_loss_settings):
         details = bias_loss_settings
 
-        attention_maps = None
+        attention_maps = []
 
         if details:
             if 'block_class' in details and details['block_class'] is not None:
                 if 'total_map_size' in details and details['total_map_size'] is not None:
-                    attention_maps = self.attn_fetch_x.get_specific_unet_cross_attn_map(self.unet, 
-                                                                                        block_class = details['block_class'],
-                                                                                        total_map_size = details['total_map_size']) # (s,s,77)
+                    for size in details['total_map_size']:
+                        attention_maps.append(
+                            self.attn_fetch_x.get_specific_unet_cross_attn_map(self.unet, 
+                                                                                block_class = details['block_class'],
+                                                                                total_map_size = size) # (s,s,77)
+                        )
+                    # attention_maps = self.attn_fetch_x.get_specific_unet_cross_attn_map(self.unet, 
+                                                                                        # block_class = details['block_class'],
+                                                                                        # total_map_size = details['total_map_size']) # (s,s,77)
                 else:
                     raise Exception("for bias_loss_function_details: block_class is defined but total_map_size isn't")
             else:
