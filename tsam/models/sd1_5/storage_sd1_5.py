@@ -141,16 +141,21 @@ class AttnFetchSDX_3():
 
     def get_specific_unet_cross_attn_map(self, unet, block_class, total_map_size):
         """
-        return a (s, s, 77) tensor of selected cross attention map
+        return a (s, s, 77) tensor of selected cross attention map (averaged over layers of the specified block)
+
+        NOTE: Down blocks have 2 cross attention layers each while Up blocks have three
         """
         import numpy as np
+       
         s = int(np.sqrt(total_map_size))
 
+        if block_class != "CrossAttnUpBlock2D" and block_class != "CrossAttnDownBlock2D":
+            raise Exception(f"Invalid block class {block_class},    expected CrossAttnUpBlock2D or CrossAttnDownBlock2D")
 
         unet_attn_data = []
         for _, block in enumerate(unet.down_blocks):
             if block.__class__.__name__ == block_class:
-                if block.attentions[0].transformer_blocks[0].attn2.processor.attn_data_x.size()[0] == 256:
+                if block.attentions[0].transformer_blocks[0].attn2.processor.attn_data_x.size()[0] == total_map_size:
                     for i in range(2):
                         data = block.attentions[i].transformer_blocks[0].attn2.processor.attn_data_x
                         unet_attn_data.append(data.unsqueeze(0))
@@ -158,14 +163,21 @@ class AttnFetchSDX_3():
                     
         for _, block in enumerate(unet.up_blocks):
             if block.__class__.__name__ == block_class:
-                if block.attentions[0].transformer_blocks[0].attn2.processor.attn_data_x.size()[0] == 256:
+                if block.attentions[0].transformer_blocks[0].attn2.processor.attn_data_x.size()[0] == total_map_size:
                     for i in range(3):
                         data = block.attentions[i].transformer_blocks[0].attn2.processor.attn_data_x
                         unet_attn_data.append(data.unsqueeze(0))
 
+        # at this point, unet_attn_data is a list of (1,s*s, 77) tensors
+
+        # concatenate across block layers
         unet_attn_data = torch.cat(unet_attn_data, dim=0)
+
+        # take average across layers
         unet_attn_data = unet_attn_data.sum(0) / unet_attn_data.shape[0]
-        unet_attn_data = unet_attn_data.reshape(16,16,-1)
+
+        # reshape for return
+        unet_attn_data = unet_attn_data.reshape(s,s,-1)
         return unet_attn_data
 
     
