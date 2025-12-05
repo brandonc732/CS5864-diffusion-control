@@ -2615,7 +2615,7 @@ class StableDiffusionPipelineX_2(
                     occ_attention_map=occ_ca_map,
                     b1_attention_map=b1_ca_map,
                     b2_attention_map=b2_ca_map,
-                    ideal_ratio=1.2
+                    # ideal_ratio=1. # square of this is desired ration of cosine similarity for b1 to b2
                 )
 
             """
@@ -2711,33 +2711,55 @@ class StableDiffusionPipelineX_2(
         occ_attention_map=torch.Tensor,
         b1_attention_map=torch.Tensor,
         b2_attention_map=torch.Tensor,
-        ideal_ratio=2 #this is desired ration of cosine similarity for b1 to b2
+        ideal_ratio=1.3, #square of this is desired ration of magnitude of attention for b1 to b2
+        scale_factor =0.25 #coeficiant to scale loss
+        #loss threshold in latent opt config is other important param
     ):
-        cos = nn.CosineSimilarity(dim=0)
         
-        occ_embed = occ_attention_map.detach().view(-1)
-        b1_embed = b1_attention_map.view(-1)
-        b2_embed = b2_attention_map.view(-1)
+        smoothing = GaussianSmoothing(
+            kernel_size=3, sigma=0.5
+        ).to(occ_attention_map.device)
+        occ_input = F.pad(
+            occ_attention_map.unsqueeze(0).unsqueeze(0), (1, 1, 1, 1), mode="reflect"
+        )
+        occ_embed = smoothing(occ_input).squeeze(0).squeeze(0).view(-1)
 
+        b1_input = F.pad(
+            b1_attention_map.unsqueeze(0).unsqueeze(0), (1, 1, 1, 1), mode="reflect"
+        )
+        b1_embed = smoothing(b1_input).squeeze(0).squeeze(0).view(-1)
+
+        b2_input = F.pad(
+            b2_attention_map.unsqueeze(0).unsqueeze(0), (1, 1, 1, 1), mode="reflect"
+        )
+        b2_embed = smoothing(b2_input).squeeze(0).squeeze(0).view(-1)
+
+        #these values are not used for the loss computation
+        cos = nn.CosineSimilarity(dim=0)
         b1_occ_cos_score = cos(b1_embed,occ_embed)
         b2_occ_cos_score = cos(b2_embed,occ_embed)
         
-        # print(f'b1: {b1_occ_cos_score.item():.3f}, {b1_embed.mean():.3f}, b2: {b2_occ_cos_score.item():.3f}, {b2_embed.mean():.3f}')
-
-        scale_factor = 0.5
         b_mean = (b1_embed+b2_embed)/2
-        b2_sharp = b2_embed/b_mean.mean()
-        b1_sharp=b1_embed/b_mean.mean()
-        print(f'b1: {b1_occ_cos_score.item():.3f}, {b1_sharp.mean():.3f}, {b1_embed.mean():.3f}, b2: {b2_occ_cos_score.item():.3f}, {b2_sharp.mean():.3f}, {b2_embed.mean():.3f}')
-        b2_scaled = ideal_ratio*scale_factor*b2_sharp
-        b1_scaled = scale_factor*b1_sharp/ideal_ratio
-        mse_loss = torch.nn.functional.mse_loss(b2_scaled,b1_scaled)
-        print(f'mse loss: {mse_loss}')
-        loss = max(0.3,1-b1_occ_cos_score)*max(0.3,1-b2_occ_cos_score)*mse_loss
-        # pred = torch.cat([b1_occ_cos_score.reshape(-1),b2_occ_cos_score.reshape(-1)])
-        # target = torch.tensor([ideal_ratio,1],device=pred.device)
-        # loss = 1 - cos(pred,target)
-        return mse_loss
+        b2_norm = b2_embed/b_mean.mean()
+        b1_norm = b1_embed/b_mean.mean()
+        occ_norm = occ_embed/occ_embed.mean()
+
+        print(f'b1: {b1_occ_cos_score.item():.3f}, {b1_norm.mean():.3f}, {b1_embed.mean():.3f}, b2: {b2_occ_cos_score.item():.3f}, {b2_norm.mean():.3f}, {b2_embed.mean():.3f}')
+        
+        b2_scaled = ideal_ratio*b2_norm
+        b1_scaled = b1_norm/ideal_ratio
+        loss = scale_factor*(occ_norm*(b2_scaled - b1_scaled)**2).mean()
+        
+        #old loss
+        # scale_factor = 0.5
+        # b2_scaled = ideal_ratio*scale_factor*b2_norm
+        # b1_scaled = scale_factor*b1_norm/ideal_ratio
+        # mse_loss = torch.nn.functional.mse_loss(b2_scaled,b1_scaled)
+
+        return loss
+
+
+
 
     """
     Function to retrieve the cross attention map from a specific layer in the UNet
