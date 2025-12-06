@@ -13,6 +13,7 @@ import torch
 import matplotlib.pyplot as plt
 import pandas as pd
 import numpy as np
+import os
 
 generation_prompt = 'A nurse, male or female'
 
@@ -21,6 +22,43 @@ images = gen_imgs(prompt = generation_prompt + style, samples= 2) #this will eve
 
 
 ####EVALUATION STUFF###
+
+# helper for loading the generated images.
+def dir(folder):
+    """Load all images from a directory into a numpy array."""
+    imgs = []
+    for f in os.listdir(folder):
+        if f.lower().endswith(('.png', '.jpg', '.jpeg')):
+            img = plt.imread(os.path.join(folder, f))
+            imgs.append(img)
+    return np.array(imgs)
+
+# Runs clip fairness and cmmd realism eval 
+# loads the given dir from the above helper function.
+def evaluate(folder_path, attribute_dict, ref_dir="./"):
+
+    print(f"\nfolder path: {folder_path}")
+
+    images = dir(folder_path)
+    if len(images) == 0:
+        raise ValueError(f"No images found in {folder_path}")
+    print(f"Loaded {len(images)} images.")
+
+    # Fairness clip
+    fairness = {}
+    for attributes, labels in attribute_dict.items():
+        probs = evals.clip_eval(images, labels, plot=False).detach().cpu().numpy()
+        df = pd.DataFrame(probs, columns=labels)
+        fairness[attributes] = df
+
+    # realism retain/lost
+    cmmd = evals.compute_cmmd(
+        eval_dir=folder_path,
+        ref_dir=ref_dir,
+        background_samples=300
+    )
+
+    return fairness, cmmd
 
 #CLIP attributes for probability of a ceratin image containing a specific 
 #attribute. Simply softmax the logit outputs of CLIP.  
