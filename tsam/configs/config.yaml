@@ -1,8 +1,12 @@
 guidance_scale: 7.5
 max_iter_to_alter: 30
 iterative_refinement_steps: [0, 10, 20]
+
+
 refinement_steps: 20
 scale_factor: 5
+
+
 attn_res: [16, 16]
 do_smoothing: true
 smoothing_sigma: 0.5

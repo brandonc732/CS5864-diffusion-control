@@ -51,6 +51,8 @@ from diffusers.utils.torch_utils import randn_tensor
 from pytorch_metric_learning import distances, losses
 
 
+from tsam.logger.bias_logger import BiasLogger
+
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
 
 EXAMPLE_DOC_STRING = """
@@ -1922,10 +1924,6 @@ class StableDiffusionPipelineX_2(
                     progress_bar.update()
 
 
-        print("Loading back VAE and text_encoder for final steps")
-        self.text_encoder.to(device)
-        self.vae.to(device)
-
         output_type = "pil"
         if not output_type == "latent":
             image = self.vae.decode(latents / self.vae.config.scaling_factor, return_dict=False, generator=generator)[
@@ -1971,7 +1969,10 @@ class StableDiffusionPipelineX_2(
 
         bias_prompt_form = None,
         bias_info = None,          # list of dictionaries
-        occupation_info = None     # just a dictionary
+        occupation_info = None,    # just a dictionary
+        bias_ratio_goal = None,
+
+        logger: BiasLogger = None              # Grant's generation logging tool
     ):
         r"""
         The call function to the pipeline for simple bias loss generation.
@@ -2010,6 +2011,24 @@ class StableDiffusionPipelineX_2(
         Returns:
             image, attention maps
         """
+
+        # initialize logger information
+        if logger is not None:
+            # make sure logger can decode latents
+            if getattr(logger, "decode_fn", None) is None:
+                logger.vae = self.vae
+                logger.latent_scale = getattr(self.vae.config, "scaling_factor", logger.latent_scale)
+                logger.decode_fn = logger._default_decode_fn  # uses logger.vae internally
+
+            logger.set_metadata(
+                prompt=prompt,
+                bias_prompt_form=bias_prompt_form,
+                bias_words=[b.get("word") for b in (bias_info or [])],
+                occupation=occupation_info.get("word") if occupation_info else None,
+                num_inference_steps=num_inference_steps,
+                max_iter_to_alter=max_iter_to_alter,
+                steps_to_save_attention_maps=steps_to_save_attention_maps,
+            )
 
         # 0. Default height and width to unet
         height = self.unet.config.sample_size * self.vae_scale_factor
@@ -2152,8 +2171,9 @@ class StableDiffusionPipelineX_2(
 
             
             # insert the OVAM optimized bias word embedding into the bias prompt embedding
-            bias_prompt_embeds = bias_prompt_embeds.clone()
-            bias_prompt_embeds[0, bias_index, :] = torch.tensor(bias_dict['opt_embedding']).to(prompt_embeds.dtype)
+            if False:
+                bias_prompt_embeds = bias_prompt_embeds.clone()
+                bias_prompt_embeds[0, bias_index, :] = torch.tensor(bias_dict['opt_embedding']).to(prompt_embeds.dtype)
             
 
             # add to dictionary
@@ -2360,9 +2380,13 @@ class StableDiffusionPipelineX_2(
                                 eos_idx=eos_idx,
                                 
                                 bias_info=bias_info,             # list of dictionaries
-                                occupation_info=occupation_info  # just a dictionary  
+                                occupation_info=occupation_info,  # just a dictionary 
+                                bias_ratio_goal=bias_ratio_goal,
+                                frame=i 
                             )
-                            print(f"T-SAM loss after BIAS iter refinement: {loss.item()}")
+
+                            if loss != 0: # done when I don't want to run TSAM afterwards
+                                print(f"T-SAM loss after BIAS iter refinement: {loss.item()}")
 
                             
                         
@@ -2379,7 +2403,20 @@ class StableDiffusionPipelineX_2(
                                 )
                         ##########
                         
-                        
+                                # log stuff for logger
+                        self.log_cross_attention_stuff(latents=latent,
+                                                       text_embeddings=text_embedding,
+                                                       t=t,
+                                                       frame=i,
+                                                       latent_opt_config=latent_opt_config,
+                                                       
+                                                       bias_info=bias_info,             # list of dictionaries
+                                                       occupation_info=occupation_info, # just a dictionary
+                                                       logger=logger  
+                        )
+
+                        logger.log_image(latent)
+                                
                         
                         updated_latents.append(latent)
                     
@@ -2475,7 +2512,10 @@ class StableDiffusionPipelineX_2(
         eos_idx=None,
 
         bias_info=None,        # list of dictionaries
-        occupation_info=None   # just a dictionary
+        occupation_info=None,  # just a dictionary
+        bias_ratio_goal=None,
+        frame=None             # used to fetch bias loss reducers if used
+
     ):
         """
         Performs modified latent refinment based on matching the cross attention matrices of the two biased prompt embeddings
@@ -2504,6 +2544,9 @@ class StableDiffusionPipelineX_2(
             details = latent_opt_config.bias_loss_function_details
             if 'max_cnt' in details:
                 max_cnt=details['max_cnt']
+            step_info = latent_opt_config.bias_refine_step_info
+            if step_info:
+                max_cnt=step_info[frame][1]
         
 
         # set break threshold
@@ -2511,9 +2554,17 @@ class StableDiffusionPipelineX_2(
         if latent_opt_config.bias_loss_threshold:
             bias_loss_threshold=latent_opt_config.bias_loss_threshold
 
+        # set do TSAM after
+        do_TSAM_after = True
+        if details:
+            do_TSAM_after = details['do_TSAM_after']
+
+
 
         cnt = 0 
         loss = 100.0
+        previous_loss = loss
+        previous_latents = latents.clone().detach()
         original_occ_maps = []
         # manually set
         # loss_threshold = {5:0.005*15, 6:0.03*21, 7:0.03*28} # 0.03 is average cosine distance
@@ -2610,26 +2661,18 @@ class StableDiffusionPipelineX_2(
 
             # TODO: implement loss function
             loss=0
-            for occ_ca_map, b1_ca_map, b2_ca_map in zip(original_occ_maps, b1_ca_maps, b2_ca_maps):
+            for occ_ca_map, b1_ca_map, b2_ca_map in zip(occ_ca_maps, b1_ca_maps, b2_ca_maps):
                 loss += self._compute_bias_self_attn_loss_cos(
                     occ_attention_map=occ_ca_map,
                     b1_attention_map=b1_ca_map,
                     b2_attention_map=b2_ca_map,
+                    ideal_ratio=bias_ratio_goal,
+                    ratio_lost_adj=step_info[frame][0],
+                    avg_lost_adj=step_info[frame][3]
                     # ideal_ratio=1. # square of this is desired ration of cosine similarity for b1 to b2
                 )
 
-            """
-            loss = self.some_loss_function(
-                occ_attention_map=occ_ca_map,
-                b1_attention_map=b1_ca_map,
-                b2_attention_map=b2_ca_map,
-            )
-            """
             # all of these maps should be a 2D matrix
-
-            # import warnings
-            # warnings.warn("Bias loss function has not been implemented yet. Setting to 0 by default")
-            # loss = 0
 
             print(f'bias loss iter {cnt}: {loss.item()}')
 
@@ -2639,9 +2682,18 @@ class StableDiffusionPipelineX_2(
             if loss < bias_loss_threshold:
                 print(f"bias loss breaking from loss < {bias_loss_threshold}")
                 break
+            
+            if loss > previous_loss:
+                print("breaking because loss increased")
+                latents = previous_latents.clone().detach()
+                break
+            else:
+                previous_loss = loss
+                previous_latents = latents.clone().detach()
 
             if loss != 0:
-                latents = self._update_latent(latents, loss, 10*step_size)
+                step_size_mult = step_info[frame][2]
+                latents = self._update_latent(latents, loss, step_size_mult * step_size)
         
 
 
@@ -2675,7 +2727,7 @@ class StableDiffusionPipelineX_2(
                                 separate_scales=separate_scales)
         
         # do T-SAM loss before returning. Added if statement to be shrinkable in VSCode
-        if True:
+        if do_TSAM_after:
             # Run one more time but don't compute gradients and update the latents.
             # We just need to compute the new loss - the grad update will occur below
             latents = latents.clone().detach().requires_grad_(True)
@@ -2702,6 +2754,8 @@ class StableDiffusionPipelineX_2(
                     self_attn_score_pairs=self_attn_score_pairs,
                     avg_text_sa_norm=avg_text_sa_norm,
                 )
+        else:
+            loss = 0
             
         return loss, latents
 
@@ -2712,8 +2766,10 @@ class StableDiffusionPipelineX_2(
         b1_attention_map=torch.Tensor,
         b2_attention_map=torch.Tensor,
         ideal_ratio=1.3, #square of this is desired ration of magnitude of attention for b1 to b2
-        scale_factor =0.25 #coeficiant to scale loss
+        scale_factor =0.25, #coeficiant to scale loss
         #loss threshold in latent opt config is other important param
+        avg_lost_adj=1,
+        ratio_lost_adj=1
     ):
         
         smoothing = GaussianSmoothing(
@@ -2738,17 +2794,25 @@ class StableDiffusionPipelineX_2(
         cos = nn.CosineSimilarity(dim=0)
         b1_occ_cos_score = cos(b1_embed,occ_embed)
         b2_occ_cos_score = cos(b2_embed,occ_embed)
-        
-        b_mean = (b1_embed+b2_embed)/2
-        b2_norm = b2_embed/b_mean.mean()
-        b1_norm = b1_embed/b_mean.mean()
-        occ_norm = occ_embed/occ_embed.mean()
+        mean_cos_sim =  (b1_occ_cos_score + b2_occ_cos_score) / 2
+        mean_cos_sim_loss = avg_lost_adj * torch.abs(0.9 - mean_cos_sim)
 
-        print(f'b1: {b1_occ_cos_score.item():.3f}, {b1_norm.mean():.3f}, {b1_embed.mean():.3f}, b2: {b2_occ_cos_score.item():.3f}, {b2_norm.mean():.3f}, {b2_embed.mean():.3f}')
+        ratio_loss = torch.abs(ideal_ratio - (b1_occ_cos_score / b2_occ_cos_score))
+
+        loss = ratio_lost_adj * ratio_loss + mean_cos_sim_loss
         
-        b2_scaled = ideal_ratio*b2_norm
-        b1_scaled = b1_norm/ideal_ratio
-        loss = scale_factor*(occ_norm*(b2_scaled - b1_scaled)**2).mean()
+        #print(f"bias loss: {loss.item():.3f}")
+
+        #b_mean = (b1_embed+b2_embed)/2
+        #b2_norm = b2_embed/b_mean.mean()
+        #b1_norm = b1_embed/b_mean.mean()
+        #occ_norm = occ_embed/occ_embed.mean()
+
+        #print(f'b1: {b1_occ_cos_score.item():.3f}, {b1_norm.mean():.3f}, {b1_embed.mean():.3f}, b2: {b2_occ_cos_score.item():.3f}, {b2_norm.mean():.3f}, {b2_embed.mean():.3f}')
+        
+        #b2_scaled = ideal_ratio*b2_norm
+        #b1_scaled = b1_norm/ideal_ratio
+        #loss = scale_factor*(occ_norm*(b2_scaled - b1_scaled)**2).mean()
         
         #old loss
         # scale_factor = 0.5
@@ -2803,6 +2867,115 @@ class StableDiffusionPipelineX_2(
             attention_maps = self.attn_fetch_x.storage # (16,16,77)
         
         return attention_maps
+    
+
+
+    def log_cross_attention_stuff(
+        self, 
+        logger: BiasLogger,
+        latents,
+        text_embeddings,
+        t, 
+        frame,
+        latent_opt_config,
+        
+        bias_info,             # list of dictionaries
+        occupation_info  # just a dictionary  
+    ):
+        
+        #print("Logger cross attention plot function")
+        
+        details = latent_opt_config.bias_loss_function_details
+
+
+        with torch.no_grad():
+            latents = latents.clone().detach().requires_grad_(False)
+
+            # get the cross attention map for the occupation
+            self.unet(latents, t, encoder_hidden_states=text_embeddings).sample
+            self.unet.zero_grad()
+
+            # function to get cross attention map matrix based on biased loss settings (ex: what UNet layer)
+            prompt_attention_maps = self.bias_loss_get_unet_cross_attention_map(t, latent_opt_config.bias_loss_function_details)
+
+            all_occ_attn_maps = self.attn_fetch_x.get_unet_cross_attn_maps(self.unet) # get a list of all cross attention maps (for displaying)
+
+            # get ca matrix for occupation
+            occ_ca_maps = []
+            for map in prompt_attention_maps:
+                occ_ca_maps.append(map[:, :, occupation_info['idx']].squeeze())
+            # print('prompt',prompt_attention_maps.shape,occ_ca_map.shape)
+
+
+            # get the cross attention map for first bias
+            self.unet(latents, t, encoder_hidden_states=bias_info[0]['prompt_embedding']).sample
+            self.unet.zero_grad()
+
+            # function to get cross attention map matrix based on biased loss settings (ex: what UNet layer)
+            b1_attention_maps = self.bias_loss_get_unet_cross_attention_map(t, latent_opt_config.bias_loss_function_details)
+
+            all_b1_attn_maps = self.attn_fetch_x.get_unet_cross_attn_maps(self.unet) # get a list of all cross attention maps (for displaying)
+            b1_ca_maps = []
+            # get ca matrix for first bias
+            for map in b1_attention_maps:
+                b1_ca_maps.append(map[:, :, bias_info[0]['idx']].squeeze())
+            # b1_ca_map = b1_attention_maps[:, :, bias_info[0]['idx']].squeeze()
+
+
+
+
+            # get the cross attention map for second bias
+            self.unet(latents, t, encoder_hidden_states=bias_info[1]['prompt_embedding']).sample
+            self.unet.zero_grad()
+
+            # function to get cross attention map matrix based on biased loss settings (ex: what UNet layer)
+            b2_attention_maps = self.bias_loss_get_unet_cross_attention_map(t, latent_opt_config.bias_loss_function_details)
+
+            all_b2_attn_maps = self.attn_fetch_x.get_unet_cross_attn_maps(self.unet) # get a list of all cross attention maps (for displaying)
+
+            # get ca matrix for second bias
+            b2_ca_maps = []
+            for map in b2_attention_maps:
+                b2_ca_maps.append(map[:, :, bias_info[1]['idx']].squeeze())
+            # b2_ca_map = b2_attention_maps[:, :, bias_info[1]['idx']].squeeze()
+            
+            # print('b1',b1_attention_maps.shape,b1_ca_map.shape)
+            # print('b2',b2_attention_maps.shape,b2_ca_map.shape)
+
+        logger.log_attention("occ_ca", occ_ca_maps[0].detach())
+        logger.log_attention(f"bias_{bias_info[0]['word']}_ca", b1_ca_maps[0].detach())
+        logger.log_attention(f"bias_{bias_info[1]['word']}_ca", b2_ca_maps[0].detach())
+        
+
+        separate_scales = details.get("separate_scales") if details else None # get key-value if details exists
+        
+        if details and 'display' in details:
+            if details['display'] == 'all':
+                img = plot_all_bias_maps(occ_maps=all_occ_attn_maps,
+                                    b1_maps=all_b1_attn_maps,
+                                    b2_maps=all_b2_attn_maps,
+                                    occ_info=occupation_info,
+                                    bias_info=bias_info,
+                                    separate_scales=separate_scales,
+                                    show=False, return_pil=True, logger=logger)
+            else:
+                img = plot_bias_maps(occ_map = occ_ca_maps[0].detach(),
+                                b1_map = b1_ca_maps[0].detach(), 
+                                b2_map = b2_ca_maps[0].detach(),
+                                occ_info=occupation_info,
+                                bias_info=bias_info,
+                                separate_scales=separate_scales,
+                                frame=frame, show=False, return_pil=True, logger=logger)                    
+        else:
+            img = plot_bias_maps(occ_map = occ_ca_maps[0].detach(),
+                            b1_map = b1_ca_maps[0].detach(), 
+                            b2_map = b2_ca_maps[0].detach(),
+                            occ_info=occupation_info,
+                            bias_info=bias_info,
+                            separate_scales=separate_scales,
+                            frame=frame, show=False, return_pil=True, logger=logger)
+        
+        logger.log_attention_plot(img)
 
 
 class GaussianSmoothing(torch.nn.Module):
@@ -2894,7 +3067,8 @@ class GaussianSmoothing(torch.nn.Module):
 
 
 
-def plot_all_bias_maps(occ_maps, b1_maps, b2_maps, occ_info, bias_info, separate_scales):
+def plot_all_bias_maps(occ_maps, b1_maps, b2_maps, occ_info, bias_info, separate_scales,
+                       show=True, return_pil=False, logger=None):
 
     import matplotlib.pyplot as plt
     
@@ -2940,13 +3114,27 @@ def plot_all_bias_maps(occ_maps, b1_maps, b2_maps, occ_info, bias_info, separate
             fig.colorbar(im, ax=axes[2], fraction=0.046, pad=0.04)
 
         plt.tight_layout()
-        plt.show()
+
+        pil = None
+        if return_pil:
+            # best: reuse logger's helper if provided
+            if logger is not None:
+                pil = logger._fig_to_pil(fig)
+            
+            plt.close()
+        
+            return pil
+
+
+        else:
+            plt.show()
 
 
 
 
 
-def plot_bias_maps(occ_map, b1_map, b2_map, occ_info, bias_info, separate_scales):
+def plot_bias_maps(occ_map, b1_map, b2_map, occ_info, bias_info, separate_scales,
+                   frame=None, show=True, return_pil=False, logger=None):
     import matplotlib.pyplot as plt
 
     # Move to CPU + convert to numpy for matplotlib
@@ -2954,13 +3142,20 @@ def plot_bias_maps(occ_map, b1_map, b2_map, occ_info, bias_info, separate_scales
     b1_np  =  b1_map.detach().cpu().numpy()
     b2_np  =  b2_map.detach().cpu().numpy()
 
+
+    # cosine similarities for titles
+    b1_cos_sim, b2_cos_sim = get_cos_sim_with_smoothing(occ_map, b1_map, b2_map)
+
+
     # Shared scale
     vmin = min(occ_np.min(), min(b1_np.min(), b2_np.min()))
     vmax = max(occ_np.max(), max(b1_np.max(), b2_np.max()))
 
     fig, axes = plt.subplots(1, 3, figsize=(12, 6))
 
-    for ax, data, title in zip(axes, [occ_np, b1_np, b2_np], [occ_info['word'], bias_info[0]['word'], bias_info[1]['word']]):
+    for ax, data, title in zip(axes, [occ_np, b1_np, b2_np], [f"{occ_info['word']}: frame {frame}", 
+                                                              f"{bias_info[0]['word']}:  {b1_cos_sim:.4}", 
+                                                              f"{bias_info[1]['word']}:  {b2_cos_sim:.4}"]):
         # separate scales
         if separate_scales:
             im = ax.imshow(data)
@@ -2984,5 +3179,46 @@ def plot_bias_maps(occ_map, b1_map, b2_map, occ_info, bias_info, separate_scales
         fig.colorbar(im, ax=axes[2], fraction=0.046, pad=0.04)
 
     plt.tight_layout()
-    plt.show()
 
+    pil = None
+    if return_pil:
+        # best: reuse logger's helper if provided
+        if logger is not None:
+            pil = logger._fig_to_pil(fig)
+        
+        plt.close()
+    
+        return pil
+
+
+    else:
+        plt.show()
+
+
+
+
+def get_cos_sim_with_smoothing(occ_attention_map, b1_attention_map, b2_attention_map):
+    smoothing = GaussianSmoothing(
+            kernel_size=3, sigma=0.5
+    ).to(occ_attention_map.device)
+    occ_input = F.pad(
+        occ_attention_map.unsqueeze(0).unsqueeze(0), (1, 1, 1, 1), mode="reflect"
+    )
+    occ_embed = smoothing(occ_input).squeeze(0).squeeze(0).view(-1)
+
+    b1_input = F.pad(
+        b1_attention_map.unsqueeze(0).unsqueeze(0), (1, 1, 1, 1), mode="reflect"
+    )
+    b1_embed = smoothing(b1_input).squeeze(0).squeeze(0).view(-1)
+
+    b2_input = F.pad(
+        b2_attention_map.unsqueeze(0).unsqueeze(0), (1, 1, 1, 1), mode="reflect"
+    )
+    b2_embed = smoothing(b2_input).squeeze(0).squeeze(0).view(-1)
+
+    #these values are not used for the loss computation
+    cos = nn.CosineSimilarity(dim=0)
+    b1_occ_cos_score = cos(b1_embed,occ_embed)
+    b2_occ_cos_score = cos(b2_embed,occ_embed)
+
+    return b1_occ_cos_score, b2_occ_cos_score

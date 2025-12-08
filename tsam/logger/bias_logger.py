@@ -27,6 +27,7 @@ class BiasLogger:
         self,
         save_dir: Union[str, Path],
         vae: Optional[Any] = None,
+        image_processor: Optional[Any] = None,
         decode_fn: Optional[Callable[[TensorLike], Image.Image]] = None,
         compress_npz: bool = True,
         image_format: str = "PNG",
@@ -36,6 +37,7 @@ class BiasLogger:
         self.save_dir.mkdir(parents=True, exist_ok=True)
 
         self.vae = vae
+        self.image_processor = image_processor
         if decode_fn is not None:
             self.decode_fn = decode_fn
         elif vae is not None:
@@ -54,16 +56,28 @@ class BiasLogger:
         self._images: List[Image.Image] = []
         self.metadata: Dict[str, object] = {}
 
+        self.attention_plots = []
+
     # internal method
     def _default_decode_fn(self, latents: torch.Tensor) -> Image.Image:
+        
+        with torch.no_grad():
+            img = self.vae.decode(latents / self.vae.config.scaling_factor, return_dict=False)[0]
+        """
         latents = latents / self.latent_scale
         latents = latents.to(self.vae.dtype)
         with torch.no_grad():
-            img = self.vae.decode(latents).sample  # B,3,H,W
+             = self.vae.decode(latents).sample  # B,3,H,W
+        """
+        """
         img = img[0] if img.ndim == 4 else img  # handle batch=1
         img = (img.clamp(-1, 1) + 1) / 2
         img = (img * 255).byte().cpu().permute(1, 2, 0).numpy()
-        return Image.fromarray(img)
+        """
+
+        img = self.image_processor.postprocess(img, output_type='pil', do_denormalize=[True])
+
+        return img[0]
 
     def _to_tensor(self, x) -> torch.Tensor:
         if isinstance(x, np.ndarray):
@@ -76,6 +90,9 @@ class BiasLogger:
     def log_attention(self, layer_name: str, attn: TensorLike) -> None:
         t = self._to_tensor(attn).detach().cpu()
         self._attn.setdefault(layer_name, []).append(t)
+    
+    def log_attention_plot(self, attn_plot : Image) -> None:
+        self.attention_plots.append(attn_plot)
 
     def log_bias_loss(self, loss: Union[float, torch.Tensor]) -> None:
         v = float(loss.detach().cpu().item()) if isinstance(loss, torch.Tensor) else float(loss)
@@ -94,11 +111,11 @@ class BiasLogger:
         if self.decode_fn is None:
             raise ValueError("No decode_fn or VAE provided; cannot decode latent.")
 
-        t = self._to_tensor(img_or_latent).detach().cpu()
+        t = self._to_tensor(img_or_latent).detach()#.cpu()
         if t.ndim == 3 and t.shape[0] == 4:  # latent (4,H,W)
             pil = self.decode_fn(t)
         elif t.ndim == 4 and t.shape[1] == 4:  # batch latent
-            pil = self.decode_fn(t[0])
+            pil = self.decode_fn(t)
         else:
             # assume image tensor
             if t.ndim == 3 and t.shape[0] in (1, 3):
@@ -272,6 +289,26 @@ class BiasLogger:
         duration = int(1000 / max(1, fps))
         frames[0].save(out_fname, save_all=True, append_images=frames[1:], duration=duration, loop=0, disposal=2)
         return out_fname
+    
+    def animate_ca_plots(self, out_fname: Optional[Union[str, Path]] = None, fps: int = 4):
+        """
+        Create GIF from logged cross attention plots (self.attention_pots).
+        Use this to show how the cross attention evolves each latent iteration.
+        """
+        if not self.attention_plots:
+            raise ValueError("No images logged to animate.")
+
+        frames = [img.convert("RGBA") for img in self.attention_plots]
+        if out_fname is None:
+            out_fname = self.save_dir / "images" / "image_progression.gif"
+            (self.save_dir / "images").mkdir(parents=True, exist_ok=True)
+        else:
+            out_fname = Path(out_fname)
+            out_fname.parent.mkdir(parents=True, exist_ok=True)
+
+        duration = int(1000 / max(1, fps))
+        frames[0].save(out_fname, save_all=True, append_images=frames[1:], duration=duration, loop=0, disposal=2)
+        return out_fname
 
     def animate_bias_metrics(self, out_fname: Optional[Union[str, Path]] = None, fps: int = 4, window: Optional[int] = None):
         """
@@ -319,4 +356,45 @@ class BiasLogger:
 
         duration = int(1000 / max(1, fps))
         frames[0].save(out_fname, save_all=True, append_images=frames[1:], duration=duration, loop=0, disposal=2)
+        return out_fname
+
+
+
+
+
+
+
+
+
+    def _write_mp4(self, frames, out_fname: Path, fps: int = 4, codec: str = "libx264"):
+        """
+        Write MP4 using imageio (ffmpeg backend). Frames should be PIL Images.
+        """
+        import numpy as np
+        import imageio.v2 as imageio  # pip install imageio imageio-ffmpeg
+
+        out_fname = Path(out_fname)
+        out_fname.parent.mkdir(parents=True, exist_ok=True)
+
+        # Ensure consistent size + even dims for broad MP4 compatibility (yuv420p)
+        w, h = frames[0].size
+        if (w % 2) == 1: w += 1
+        if (h % 2) == 1: h += 1
+
+        writer = imageio.get_writer(
+            str(out_fname),
+            fps=fps,
+            codec=codec,
+            pixelformat="yuv420p",
+        )
+
+        try:
+            for im in frames:
+                if im.size != (w, h):
+                    im = im.resize((w, h))
+                arr = np.asarray(im.convert("RGB"))  # MP4 doesn't support alpha
+                writer.append_data(arr)
+        finally:
+            writer.close()
+
         return out_fname
