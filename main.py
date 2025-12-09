@@ -15,6 +15,8 @@ import pandas as pd
 import numpy as np
 import os
 
+from PIL import Image
+
 generation_prompt = 'A nurse, male or female'
 
 style = ', colored image, photorealistic'
@@ -29,9 +31,9 @@ def dir(folder):
     imgs = []
     for f in os.listdir(folder):
         if f.lower().endswith(('.png', '.jpg', '.jpeg')):
-            img = plt.imread(os.path.join(folder, f))
+            img = Image.open(os.path.join(folder, f)).convert("RGB")
             imgs.append(img)
-    return np.array(imgs)
+    return imgs
 
 # Runs clip fairness and cmmd realism eval 
 # loads the given dir from the above helper function.

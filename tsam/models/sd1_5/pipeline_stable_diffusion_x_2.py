@@ -2403,19 +2403,21 @@ class StableDiffusionPipelineX_2(
                                 )
                         ##########
                         
-                                # log stuff for logger
-                        self.log_cross_attention_stuff(latents=latent,
-                                                       text_embeddings=text_embedding,
-                                                       t=t,
-                                                       frame=i,
-                                                       latent_opt_config=latent_opt_config,
-                                                       
-                                                       bias_info=bias_info,             # list of dictionaries
-                                                       occupation_info=occupation_info, # just a dictionary
-                                                       logger=logger  
-                        )
+                        # log stuff for logger
+                        if logger:
+                            self.log_cross_attention_stuff(latents=latent,
+                                                        text_embeddings=text_embedding,
+                                                        t=t,
+                                                        frame=i,
+                                                        latent_opt_config=latent_opt_config,
+                                                        
+                                                        bias_info=bias_info,             # list of dictionaries
+                                                        occupation_info=occupation_info, # just a dictionary
+                                                        logger=logger  
+                            )
 
-                        logger.log_image(latent)
+                        #if logger:
+                        #    logger.log_image(latent)
                                 
                         
                         updated_latents.append(latent)
@@ -2453,6 +2455,13 @@ class StableDiffusionPipelineX_2(
                 if self.do_classifier_free_guidance:
                     noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
                     noise_pred = noise_pred_uncond + self.guidance_scale * (noise_pred_text - noise_pred_uncond)
+                
+                # After guidance (noise_pred is final guided eps/v/etc.)
+                if logger:
+                    with torch.no_grad():
+                        pred_x0 = self._predict_x0(latents, noise_pred_text, t, i).detach()
+
+                        logger.log_image(pred_x0)
 
                 # compute the previous noisy sample x_t -> x_t-1
                 latents = self.scheduler.step(noise_pred, t, latents, return_dict=False)[0] # removed **extra_step_kwargs which is normally {}
@@ -2490,7 +2499,25 @@ class StableDiffusionPipelineX_2(
         # return StableDiffusionPipelineOutput(images=image, nsfw_content_detected=has_nsfw_concept), attention_map
         return image, attention_map
 
+    def _predict_x0(self, sample: torch.Tensor, model_output: torch.Tensor, t: torch.Tensor, step_idx: int):
+        sched = self.scheduler
+        pred_type = getattr(sched.config, "prediction_type", "epsilon")
 
+        # (A) alpha-based schedulers (DDIM/PNDM/etc.)
+        if hasattr(sched, "alphas_cumprod"):
+            alpha_prod_t = sched.alphas_cumprod[t].to(device=sample.device, dtype=sample.dtype)
+            beta_prod_t = 1 - alpha_prod_t
+
+            # broadcast to [B,1,1,1]
+            alpha_prod_t = alpha_prod_t.view(1, 1, 1, 1)
+            beta_prod_t  = beta_prod_t.view(1, 1, 1, 1)
+
+            if pred_type == "epsilon":
+                return (sample - beta_prod_t.sqrt() * model_output) / alpha_prod_t.sqrt()
+            elif pred_type == "v_prediction":
+                return alpha_prod_t.sqrt() * sample - beta_prod_t.sqrt() * model_output
+            elif pred_type == "sample":
+                return model_output
 
     """
     Implements iterative loss on bias setup.
