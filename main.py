@@ -24,7 +24,7 @@ images = gen_imgs(prompt = generation_prompt + style, samples= 2) #this will eve
 ####EVALUATION STUFF###
 
 # helper for loading the generated images.
-def dir(folder):
+def dir_load_images(folder):
     """Load all images from a directory into a numpy array."""
     imgs = []
     for f in os.listdir(folder):
@@ -33,13 +33,24 @@ def dir(folder):
             imgs.append(img)
     return np.array(imgs)
 
+def clip_eval_batched(images, labels, batch_size=16):
+    """Runs CLIP fairness in batches to avoid huge RAM spikes."""
+    all_probs = []
+
+    for i in range(0, len(images), batch_size):
+        batch = images[i : i + batch_size]
+        probs = evals.clip_eval(batch, labels, plot=False).detach().cpu().numpy()
+        all_probs.append(probs)
+
+    return np.concatenate(all_probs, axis=0)
+
 # Runs clip fairness and cmmd realism eval 
 # loads the given dir from the above helper function.
-def evaluate(folder_path, attribute_dict, ref_dir="./"):
+def evaluate(folder_path, attribute_dict, ref_dir="./", batch_size = 16):
 
     print(f"\nfolder path: {folder_path}")
 
-    images = dir(folder_path)
+    images = dir_load_images(folder_path)
     if len(images) == 0:
         raise ValueError(f"No images found in {folder_path}")
     print(f"Loaded {len(images)} images.")
@@ -47,7 +58,8 @@ def evaluate(folder_path, attribute_dict, ref_dir="./"):
     # Fairness clip
     fairness = {}
     for attributes, labels in attribute_dict.items():
-        probs = evals.clip_eval(images, labels, plot=False).detach().cpu().numpy()
+        #probs = evals.clip_eval(images, labels, plot=False).detach().cpu().numpy()
+        probs = clip_eval_batched(images, labels, batch_size=batch_size)
         df = pd.DataFrame(probs, columns=labels)
         fairness[attributes] = df
 
@@ -65,15 +77,11 @@ def evaluate(folder_path, attribute_dict, ref_dir="./"):
 
 #one attribute is calculated at a time (e.g. man/woman or white/black/hispanic,etc.)
 evaluation_dict = {
-                   'gender': ['man', 'woman'],
+                   'gender': ['a photo of a man', 'a photo of a woman'],
                 #    'race'  : ['white', 'black', 'asian', 'hispanic'],
                 #    'weight': ['fat', 'skinny'],
                 #    'age'   : ['child', 'teenager', 'adult', 'elderly person']
                    }
-for key in evaluation_dict.keys():
-    probs = evals.clip_eval(images, evaluation_dict[key], plot = True)
-    df = pd.DataFrame(data = probs.detach().cpu().numpy(), columns = evaluation_dict[key])
-    evaluation_dict[key] = df
 
 
 #https://arxiv.org/html/2401.09603v1/
@@ -83,5 +91,3 @@ for key in evaluation_dict.keys():
 
 #The initial run will be slow...
 #input can be either a list of arrays, or a directory of saved images (png/jpeg). 
-cmmd_vals = evals.compute_cmmd(images, ref_dir = r"C:\Users\dogbl\Downloads\cmmd_backgroundss", background_samples = 3)
-print(cmmd_vals)
