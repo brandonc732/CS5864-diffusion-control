@@ -19,40 +19,6 @@ All installation files and instructions are found in the `_environment_info` fol
 Below are overviews of what changes are made or need to be made to T-SAM and OVAM 
 
 
-## T-SAM folder
-
-**Brandon's current changes:**
-
-- For simplification, I've created two reduced_call functions that remove any unused code chunks and provide much better comments on what's going on
-- For investigation, I added parts within the code to display cross attention matrix development at specified steps
-- For testing, I created some initial bias guidance frameworks, but they are largely incorrect and need to be overhauled.
-- For testing, I created a jupyter lab notebook to play around with the generation without having to save images and stuff
-
-**Thing's to be done:**
-- Identify text encoder self attention bias within prompts
-  -  Consider layer combining methods other than simple averaging
-  -  If possible, try to quantify a desired ratio between bias terms
-- Add a more organized way to select what UNet layer to enforce bias loss at
-  - Maybe create a separate class for handling T-SAM and bias loss
-  - Consider a way to combine layers (OVAM does upsampling with interpolation)
-- Create a more organized separate class that's used collecting, logging, and saving:
-  - Cross attention matrices at UNet layers
-  - bias loss values
-  - decoded latents (image over generation)
-- Bring back options (lost in reduced) for:
-  - Gaussian smoothing
-  - Different T-SAM loss measurements
-- Do a direct intergration of OVAM
-  - I just approximated by running different prompt through the U-Net
-- Parameter tuning for generation process.
-
-
-## OVAM folder
-- Figure out how to make an environment that can run OVAM without changing the current T-SAM packages setup.
-- Create a simple call to get refined text tokens for given bias terms
-
-
-
 
 
 
